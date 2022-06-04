@@ -1,0 +1,1101 @@
+/* PROJET CLUBMED : CONSTRUCTION D'UN SCORE D'APPETENCE ET D'UN SYSTEME DE RECOMMANDATION */
+
+** On récupère les villages européens ;
+data village_europe_;
+	set tp_tuto.prddes (where=(paydes in ('FRANCE', 'ITALY', 'SWITZERLAND', 
+		'GREECE', 'PORTUGAL')) keep=codprd libelle paydes);
+run;
+
+proc sort data=village_europe_ nodupkey;
+	by codprd;
+run;
+
+** on charge notre base client ;
+
+data base_gm_(drop=codexc datpco codpyc codpay codfi1 agemin agemax tpsres 
+		reseau2 bu_nationality);
+	set tp_tuto.base_gm (where=(codexc ne 2014) );
+
+	/* on retire l'année 2014 car il n'y a pas assez de données par rapport aux autres */
+run;
+
+proc sort data=base_gm_;
+	by codprd numcli;
+run;
+
+/* numdos */
+/* proc freq data= tp_tuto.base_gm; table nationality ; run; */
+data base_(drop=nationality);
+	** on garde les clients français avec une durée de séjours différentes de 1 ;
+	merge base_gm_(where=(upcase(nationality)='FRANCE' and dursej ne 1)in=a) 
+		village_europe_(in=b);
+	by codprd;
+
+	if a and b;
+	destFav=1;
+run;
+
+proc sort data=base_;
+	by numcli codprd datdep;
+run;
+
+data base_;
+	set base_;
+	length nb_destination 8.;
+	by numcli codprd datdep;
+
+	if first.codprd then
+		nb_destination=1;
+	else
+		nb_destination=0;
+run;
+
+proc sort data=base_;
+	by numcli datdep codprd paydes;
+run;
+
+data base_;
+	set base_(keep=numcli numdos nb_destination nbrins paydes statut_fid bv codprd 
+		NBRENF bv_global_euro bv_vil_euro reseau1 datdep datret dursej destFav);
+	length destinationFavoris mt_nuit nb_france nb_europe 8. histo_village  $200. 
+		histo_bis statut_cli ind_fid $20.;
+	retain histo_village histo_bis histo_pays;
+	by numcli datdep codprd;
+
+	if upcase(paydes)='FRANCE' then
+		do;
+			nb_france=1;
+			nb_europe=0;
+		end;
+	else
+		do;
+			nb_europe=1;
+			nb_france=0;
+		end;
+
+	/* On peut récupérer l'historique des villages du client ici */
+	if first.numcli then
+		do;
+			histo_village=compress(codprd);
+			histo_bis='';
+
+			/* histo_pays = compress(paydes); */
+		end;
+	else
+		do;
+			histo_bis=compress(scan(histo_village, -1, '-')) || '-' || compress(codprd);
+			histo_village=compress(histo_village)||'-'||compress(codprd);
+
+			/* histo_pays = compress(histo_pays) || '-' || compress(paydes); */
+		end;
+
+	if NBRINS=1 and NBRENF=0 then
+		statut_cli='Célibataire';
+	else if NBRINS=2 and NBRENF=0 then
+		statut_cli='Couple';
+	else if NBRINS > 1 and NBRENF >=1 then
+		statut_cli='Famille';
+	else if NBRINS=1 and NBRENF=1 then
+		statut_cli='Enfant_seul';
+	else if NBRINS > 2 and NBRENF=0 then
+		statut_cli='Groupe';
+	else
+		statut_cli='ko';
+
+	if statut_fid='Platinum' then
+		ind_fid='Gold,Plat';
+	else if statut_fid='Gold' then
+		ind_fid='Gold,Plat';
+	else if statut_fid='Silver' then
+		ind_fid='Silver';
+	else if statut_fid='Turquoise' then
+		ind_fid='Turquoise';
+	mt_nuit=round(bv / dursej, 1);
+	** le discrétiser en quartile ;
+	ind_hiver=0;
+	ind_automne=0;
+	ind_printemps=0;
+	ind_ete=0;
+
+	if month(datdep)='12' or month(datdep)='01' or month(datdep)='02' then
+		do;
+			ind_hiver=1;
+		end;
+	else if month(datdep)='03' or month(datdep)='04' or month(datdep)='05' then
+		do;
+			ind_printemps=1;
+		end;
+	else if month(datdep)='06' or month(datdep)='07' or month(datdep)='08' then
+		do;
+			ind_ete=1;
+		end;
+	else if month(datdep)='09' or month(datdep)='10' or month(datdep)='11' then
+		do;
+			ind_automne=1;
+		end;
+	option missing=0;
+run;
+
+data base_;
+	set base_(where=(statut_cli not in ('ko', 'Enfant_seul')));
+run;
+
+proc freq data=base_;
+	table ind_ete ind_printemps ind_hiver ind_automne;
+run;
+
+data base_numcli_;
+	** on utilise cette table pour merger nos agrégats ;
+	set base_(keep=numcli statut_cli ind_fid);
+run;
+
+/* proc sort data= base_ ; by numcli codprd numdos  ; run; */
+proc sort data=base_;
+	by numcli codprd paydes;
+run;
+
+proc means data=base_ sum noprint;
+	by numcli codprd;
+	output out=agregat_destination(drop=_type_ _freq_) sum(destFav)=destFav;
+run;
+
+proc sort data=agregat_destination;
+	by numcli descending destFav;
+
+data agregat_destination (drop=destFav rename=(codprd=destination_fav));
+	set agregat_destination;
+	by numcli;
+
+	if first.numcli;
+run;
+
+/* proc freq data =base_ ; table paydes ; run;  */
+proc means data=base_ sum missing nway noprint;
+	by numcli;
+	output out=agregat_client_ (drop=_type_ rename=(_freq_=nb_voyage)) 
+		sum(dursej)=cumul_duree_sejr mean(dursej)=moy_duree_sejr 
+		sum(nb_destination)=nb_village sum(bv)=sommeReservation 
+		sum(bv_vil_euro)=sommeService sum(bv_global_euro)=sommeTotale 
+		mean(bv)=moyReservation mean(bv_vil_euro)=moyService 
+		mean(bv_global_euro)=moyTotale min(datdep)=premier_depart 
+		max(datret)=dernier_retour mean(bv_global_euro)=moyenne_depenseTotale 
+		sum(mt_nuit)=sommeMtNuit mean(mt_nuit)=moyMtNuit sum(ind_ete)=ind_ete 
+		sum(ind_automne)=ind_automne sum(ind_hiver)=ind_hiver 
+		sum(ind_printemps)=ind_printemps sum(nb_france)=ind_france 
+		sum(nb_europe)=ind_europe
+
+		/* sum(ind_enfant) = ind_enfant */;
+run;
+
+** nbrins nbra nbrenf très mal renseigné pas possible de faire des indicateurs ;
+
+proc freq data=agregat_client_;
+	table ind_france ind_europe ind_france*ind_europe /missing nocol nocum;
+run;
+
+proc sort data=base_;
+	by numcli reseau1;
+run;
+
+data creation_ind_reseau_ last_reseau_table(rename=(reseau1=last_reseau));
+	set base_(keep=reseau1 numcli);
+
+	if index(reseau1, 'AG') > 0 then
+		ind_ag=1;
+	else
+		ind_ag=0;
+
+	if index(reseau1, 'CC') > 0 then
+		ind_cc=1;
+	else
+		ind_cc=0;
+
+	if index(reseau1, 'IN') > 0 then
+		ind_in=1;
+	else
+		ind_in=0;
+
+	if index(reseau1, 'WB') > 0 then
+		ind_wb=1;
+	else
+		ind_wb=0;
+	by numcli reseau1;
+
+	if first.reseau1 then
+		flag_res=1;
+	else
+		flag_res=0;
+	output creation_ind_reseau_;
+
+	if last.numcli then
+		output last_reseau_table;
+run;
+
+proc sort data=last_reseau_table(keep=numcli last_reseau);
+	by numcli;
+run;
+
+proc sort data=creation_ind_reseau_;
+	by numcli reseau1;
+run;
+
+proc means data=creation_ind_reseau_ sum noprint;
+	by numcli;
+	output out=agregat_reseau_ (drop=_type_ _freq_) sum(ind_ag)=sum_AG 
+		sum(ind_cc)=sum_CC sum(ind_in)=sum_IN sum(ind_wb)=sum_WB 
+		sum(flag_res)=nb_reseau;
+run;
+
+proc sort data=agregat_reseau_;
+	by numcli;
+run;
+
+data agregat_reseau_;
+	merge agregat_reseau_(in=a) last_reseau_table(in=b);
+	by numcli;
+
+	if a and b;
+	length type_reseaux $12. reseauFav $2.;
+
+	if nb_reseau > 1 then
+		do;
+			type_reseaux='multireseaux';
+
+			if sum_AG > sum_CC and sum_AG > sum_WB and sum_AG > sum_IN then
+				reseauFav='AG';
+			else if sum_CC > sum_AG and sum_CC > sum_WB and sum_CC > sum_IN then
+				reseauFav='CC';
+			else if sum_WB > sum_AG and sum_WB > sum_CC and sum_WB > sum_IN then
+				reseauFav='WB';
+			else if sum_IN > sum_AG and sum_IN > sum_WB and sum_IN > sum_CC then
+				reseauFav='IN';
+			ELSE
+				reseauFav=last_reseau;
+		end;
+	else if nb_reseau=1 then
+		do;
+			type_reseaux='monoreseau';
+
+			if sum_AG > sum_CC and sum_AG > sum_WB and sum_AG > sum_IN then
+				reseauFav='AG';
+			else if sum_CC > sum_AG and sum_CC > sum_WB and sum_CC > sum_IN then
+				reseauFav='CC';
+			else if sum_WB > sum_AG and sum_WB > sum_CC and sum_WB > sum_IN then
+				reseauFav='WB';
+			else if sum_IN > sum_AG and sum_IN > sum_WB and sum_IN > sum_CC then
+				reseauFav='IN';
+			ELSE
+				reseauFav='ND';
+		end;
+run;
+
+proc freq data=agregat_reseau_;
+	table type_reseaux*reseauFav type_reseaux reseauFav nb_reseau /missing nocol 
+		norow nocum;
+run;
+
+** INDICATEUR TEMPS_RETOUR ;
+
+data creation_nb_moyen_jour;
+	set agregat_client_;
+
+	if nb_voyage > 1 then
+		do;
+			nb_jour_moyen_entre_voyage=round((dernier_retour - premier_depart - cumul_duree_sejr) 
+				/ nb_voyage, 1);
+		end;
+run;
+
+data dis_nb_moyen_jour (keep=numcli temps_retour);
+	set creation_nb_moyen_jour;
+
+	if nb_jour_moyen_entre_voyage=.   then
+		temps_retour='Jamais_revenu';
+	else if nb_jour_moyen_entre_voyage > 0 and nb_jour_moyen_entre_voyage <=180 
+		then
+			temps_retour='-6_mois';
+	else if nb_jour_moyen_entre_voyage > 180 and nb_jour_moyen_entre_voyage <=365 
+		then
+			temps_retour='-_1 an';
+	else
+		temps_retour=' + 1 an';
+run;
+
+proc freq data=dis_nb_moyen_jour;
+	table temps_retour;
+run;
+
+proc freq data=creation_nb_moyen_jour;
+	table nb_jour_moyen_entre_voyage;
+run;
+
+** GESTION DU PARRAINNAGE ;
+
+data parrain_;
+	set tp_tuto.parrain(keep=numclp);
+run;
+
+data filleul_;
+	set tp_tuto.parrain(keep=numclf);
+run;
+
+proc sort data=parrain_ nodupkey;
+	by numclp;
+run;
+
+proc sort data=filleul_ nodupkey;
+	by numclf;
+run;
+
+proc sql;
+	create table estParrain_ as select a.*, b.* from agregat_reseau_ as a inner 
+		join parrain_ as b on b.numclp=a.numcli;
+	run;
+
+proc sql;
+	create table estFilleul_ as select a.*, b.* from agregat_reseau_ as a inner 
+		join filleul_ as b on b.numclf=a.numcli;
+	run;
+
+	/* FUSION DES AGREGATS AVEC LES NUMCLI DE LA BASE */
+proc sort data=agregat_destination;
+	by numcli;
+run;
+
+proc sort data=agregat_reseau_;
+	by numcli;
+run;
+
+proc sort data=dis_nb_moyen_jour;
+	by numcli;
+run;
+
+proc sort data=agregat_client_;
+	by numcli;
+run;
+
+proc sort data=base_numcli_ nodupkey;
+	by numcli;
+run;
+
+data fusion_client_(drop=sum_ag sum_cc sum_wb sum_in nb_reseau);
+	merge base_numcli_(in=a) agregat_client_ (in=b) agregat_reseau_(in=c) 
+		agregat_destination(in=d) dis_nb_moyen_jour(in=e);
+	by numcli;
+
+	if a and b and c and d and e;
+
+	if nb_voyage > 1 then
+		estRevenu=1;
+	else
+		estRevenu=0;
+run;
+
+proc sort data=estParrain_;
+	by numcli;
+run;
+
+proc sort data=estfilleul_;
+	by numcli;
+run;
+
+proc sort data=fusion_client_;
+	by numcli;
+run;
+
+data fusion_parrain_filleul_(drop=numclp numclf);
+	merge fusion_client_(in=a) estParrain_(in=b) estFilleul_(in=c);
+	by numcli;
+
+	if a;
+
+	if numcli=numclp then
+		estParrain=1;
+	else
+		estParrain=0;
+
+	if numcli=numclf then
+		estFilleul=1;
+	else
+		estFilleul=0;
+run;
+
+** obtention de la table clients avec parrainage ;
+
+/* proc sort data = fusion_parrain_filleul noduprecs ; by numcli ; run ;  */
+data table_contact_ (keep=numcli ind_multicanal ind_monocanal);
+	set tp_tuto.contacts_numcli;
+
+	if sum(flag_email, flag_sms, flag_tel, flag_mailing)>1 then
+		do;
+			ind_multicanal=1;
+			ind_monocanal=0;
+		end;
+	else if sum(flag_email, flag_sms, flag_tel, flag_mailing)=1 then
+		do;
+			ind_monocanal=1;
+			ind_multicanal=0;
+		end;
+	else
+		do;
+			ind_monocanal=1;
+			ind_multicanal=0;
+		end;
+run;
+
+proc freq data=table_contact_;
+	table ind_multicanal*ind_monocanal;
+run;
+
+proc sort data=table_contact_;
+	by numcli;
+run;
+
+proc sort data=fusion_parrain_filleul_;
+	by numcli;
+run;
+
+data fusion_client_contact_;
+	merge fusion_parrain_filleul_(in=a) table_contact_(in=b);
+	by numcli;
+
+	if a and b;
+run;
+
+data datacatching_;
+	set tp_tuto.datacatching;
+run;
+
+proc sort data=datacatching_;
+	by numcli;
+run;
+
+proc sort data=fusion_client_contact_;
+	by numcli;
+run;
+
+data fusion_client_catching_ (drop=que004 que007 codprd email);
+	merge fusion_client_contact_(in=a) datacatching_(in=b);
+	by numcli;
+
+	if a;
+	** le client est-il appétent à donner ses informations en village ? ;
+
+	if email=1 then
+		ind_data=1;
+	else
+		ind_data=0;
+run;
+
+** GESTION DES ACHATS ;
+
+data table_achats_(drop=month numdos ideref datcon sercon paiement mnt_depvil 
+		sercon_label);
+	set tp_tuto.base_achat_village(where=(year(datcon) ne 2014));
+
+	if index(IDEREF, 'SERVICES')>0 then
+		ind_service=1;
+	else
+		ind_service=0;
+
+	if index(IDEREF, 'ACHATS')>0 then
+		ind_achats=1;
+	else
+		ind_achats=0;
+
+	if index(IDEREF, 'ANIMATIO')>0 then
+		ind_animation=1;
+	else
+		ind_animation=0;
+
+	if index(IDEREF, 'RESTAURA')>0 then
+		ind_restaurant=1;
+	else
+		ind_restaurant=0;
+
+	if index(IDEREF, 'AUTRES')>0 then
+		ind_autres=1;
+	else
+		ind_autres=0;
+
+	if index(IDEREF, 'BIENETRE')>0 then
+		ind_bienetre=1;
+	else
+		ind_bienetre=0;
+
+	if index(IDEREF, 'ENFANTS') > 0 then
+		ind_achatenfant=1;
+	else
+		ind_achatEnfant=0;
+
+	if index(IDEREF, 'EXCURSIO') > 0 then
+		ind_excursion=1;
+	else
+		ind_excursion=0;
+
+	if index(IDEREF, 'SPORTS') > 0 then
+		ind_sport=1;
+	else
+		ind_sport=0;
+run;
+
+proc sort data=table_achats_;
+	by numcli;
+run;
+
+proc means data=table_achats_ sum missing nway noprint;
+	by numcli;
+	output out=agregat_achats_ (drop=_type_ rename=(_freq_=nb_achats)) 
+		sum(ind_service)=ind_service sum(ind_achats)=ind_achats 
+		sum(ind_animation)=ind_animation sum(ind_restaurant)=ind_restaurant 
+		sum(ind_achatenfant)=ind_achatenfant sum(ind_excursion)=ind_excursion 
+		sum(ind_sport)=ind_sport sum(ind_autres)=ind_autres;
+run;
+
+proc sort data=agregat_achats_;
+	by numcli;
+run;
+
+proc sort data=fusion_client_catching_;
+	by numcli;
+run;
+
+data fusion_agregat_ (drop=ind_automne ind_ete ind_hiver ind_printemps);
+	merge fusion_client_catching_(in=a) agregat_achats_(in=b);
+	by numcli;
+
+	if a;
+	** Le client a déjà acheté un service en village ? ;
+
+	if nb_achats=. or nb_achats=0 then
+		ind_achat_village=0;
+	else
+		ind_achat_village=1;
+	length type_voyage $30.;
+
+	if nb_voyage=1 and nb_village=1 then
+		type_voyage='mono sej mono village';
+	else if nb_voyage > 1 and nb_village=1 then
+		type_voyage='multi sej mono village';
+	else if (nb_voyage > 1 and nb_village > 1) and (nb_voyage=nb_village) then
+		type_voyage='change à chaque fois';
+	else if nb_voyage > 1 and nb_voyage > nb_village then
+		type_voyage='change de temps en temps';
+
+	/* ** Le client est mono ou multi saison ? ; */
+	length ind_saison $11.;
+
+	if ind_ete ne 0 and ind_automne=0 and ind_hiver=0 and ind_printemps=0 then
+		ind_saison='été';
+	else if ind_ete=0 and ind_automne ne 0 and ind_hiver=0 and ind_printemps=0 then
+		ind_saison='automne';
+	else if ind_ete=0 and ind_automne=0 and ind_hiver ne 0 and ind_printemps=0 then
+		ind_saison='hiver';
+	else if ind_ete=0 and ind_automne=0 and ind_hiver=0 and ind_printemps ne 0 then
+		ind_saison='printemps';
+	else
+		ind_saison='multisaison';
+	length ind_pays $20.;
+
+	if ind_france >=1 and ind_europe=0 then
+		ind_pays='FRANCE';
+	else if (ind_france >=1 and ind_europe >=1) and (ind_france >=ind_europe) then
+		ind_pays='FRANCE > EUROPE';
+	else if (ind_france >=1 and ind_europe >=1) and (ind_france < ind_europe) then
+		ind_pays='EUROPE > FRANCE';
+	else if ind_france=0 and ind_europe >=1 then
+		ind_pays='EUROPE';
+	else
+		ind_pays='ko';
+	** Correction de l'agrégation des indicateurs ;
+
+	if ind_service >=1 then
+		ind_service=1;
+	else
+		ind_service=0;
+
+	if ind_achats >=1 then
+		ind_achats=1;
+	else
+		ind_achats=0;
+
+	if ind_animation >=1 then
+		ind_animation=1;
+	else
+		ind_animation=0;
+
+	if ind_restaurant >=1 then
+		ind_restaurant=1;
+	else
+		ind_restaurant=0;
+
+	if ind_achatenfant >=1 then
+		ind_achatenfant=1;
+	else
+		ind_achatenfant=0;
+
+	if ind_excursion >=1 then
+		ind_excursion=1;
+	else
+		ind_excursion=0;
+
+	if ind_sport >=1 then
+		ind_sport=1;
+	else
+		ind_sport=0;
+
+	if ind_autres >=1 then
+		ind_autres=1;
+	else
+		ind_autres=0;
+	** PRIX PAR NUIT PAR DOSSIER CLIENT  ;
+	length ind_mtnuit $15.;
+
+	if moyMtNuit < 250 then
+		ind_mtnuit=' a. [0;250[';
+	else if moyMtNuit >=250 and moyMtNuit < 350 then
+		ind_mtnuit='b. [250;350[';
+	else if moyMtNuit >=350 and moyMtNuit < 500 then
+		ind_mtnuit='c. [350;500[';
+	else if moyMtNuit >=500 and moyMtNuit < 850 then
+		ind_mtnuit='d. [500;850[';
+
+	/* else if moyMtNuit >= 850 and moyMtNuit < 1250 then ind_mtnuit = 'd. [850;1250[ ' ; */
+	else
+		ind_mtnuit='e. [850; ...[';
+	** Quelle est la durée moyenne de séjour de mon client ? ;
+	length ind_dursej $20.;
+
+	if moy_duree_sejr < 7 then
+		ind_dursej='weekend';
+	else if moy_duree_sejr=7 then
+		ind_dursej='vacances 7 jours';
+	else if moy_duree_sejr > 7 then
+		ind_dursej='+ de 7 jours';
+	option missing=0;
+	**  on remplace les missings (.) par 0 ;
+run;
+
+data fusion_agregat_;
+	set fusion_agregat_ (where=(nb_village ne 0));
+run;
+
+** tri des variables pour alléger la table ;
+
+data fusion_agregat_(drop=statut_fid premier_depart dernier_retour nb_achats 
+		sum_ag sum_cc sum_in sum_wb nb_reseau numdos nbrenf datret datdep);
+	set fusion_agregat_;
+run;
+
+proc freq data=fusion_agregat_;
+	table estrevenu*type_voyage*type_reseaux;
+run;
+
+/* proc freq data = fusion_agregat_ ; table nb_voyage nb_village /missing ; run;  */
+proc freq data=fusion_agregat_;
+	table ind_pays*type_voyage /missing nocol nocum;
+run;
+
+proc freq data=fusion_agregat_;
+	table estRevenu*(temps_retour ind_achat_village ind_dursej);
+run;
+
+
+
+** selection entre les variables explicatives quantitatives ;
+
+proc corr data=fusion_agregat_ pearson spearman outp=pearson outs=spearman 
+		noprint;
+	var moyReservation moyService moyMtnuit nb_voyage moy_duree_sejr nb_village;
+run;
+
+data pearson (drop=_type_ rename=(_NAME_=variable1));
+	set pearson;
+	where _type_='CORR';
+run;
+
+proc print data=pearson;
+run;
+
+proc transpose data=pearson name=variable2 prefix=correlation out=pearson;
+	var moyReservation moyService moyMtnuit nb_voyage moy_duree_sejr;
+	by variable1 notsorted;
+
+	/* proc print data = pearson; run; */
+data pearson;
+	set pearson;
+	where variable1 < variable2;
+	abscorrelation=ABS(correlation1);
+
+proc sort data=pearson;
+	by descending abscorrelation;
+run;
+
+proc print data=pearson;
+run;
+
+pattern1 c=gray;
+
+proc gchart data=pearson;
+	vbar abscorrelation;
+	run;
+quit;
+
+goptions reset=pattern;
+** liaison var quanti ;
+ods exclude all;
+ods output KruskalWallisTest=kruskal;
+
+proc npar1way wilcoxon data=fusion_agregat_;
+	class estRevenu;
+	var moyReservation moyService moyMtnuit nb_voyage moy_duree_sejr;
+run;
+
+ods select all;
+
+Data Kruskal;
+	set kruskal;
+Run;
+
+proc sort data=kruskal;
+	by descending ChiSquare;
+run;
+
+proc print data=kruskal;
+run;
+
+pattern1 C=aquamarine;
+
+proc gchart data=kruskal;
+	vbar chisquare;
+	run;
+quit;
+
+goptions reset=pattern;
+** liaison var quali ;
+ods output ChiSq=ChiSq;
+
+proc freq data=fusion_agregat_;
+	tables (statut_cli ind_fid type_reseaux estParrain estFilleul ind_data 
+		ind_service ind_achats ind_animation ind_restaurant ind_achatenfant 
+		ind_excursion ind_sport ind_autres ind_dursej ind_saison ind_monocanal 
+		type_voyage ind_mtnuit ind_achat_village ind_pays temps_retour) * estRevenu / 
+		CHISQ nocol nocum nopercent norow;
+run;
+
+data ChiSq;
+	set ChisQ;
+	where Statistic contains "Cramer";
+	abs_V_Cramer=ABS(Value);
+	Variable=SCAN(table, 2);
+	keep Variable Value abs_V_Cramer;
+run;
+
+proc sort data=ChiSq;
+	by descending abs_V_Cramer;
+
+proc print data=ChiSq;
+run;
+
+pattern1 C=beige;
+
+proc gchart data=ChiSq;
+	VBAR abs_V_cramer;
+	run;
+quit;
+
+goptions reset=pattern;
+
+proc rank data=chisq out=chisqr descending;
+	var abs_v_cramer;
+	ranks rgcramer;
+
+proc print data=chisqr;
+run;
+
+
+
+
+
+
+
+** Création des partitions d'entraînement et de test ;
+
+data Have_;
+	set fusion_agregat_;
+	%let propTrain = 0.7;
+
+	/* proportion of training data */
+%let propTest = %sysevalf(1 - &propTrain );
+run;
+
+data Train_ Test_;
+	array p[2] _temporary_ (&propTrain, &propTest);
+	set Have_;
+	call streaminit(123);
+
+	/*random number seed */
+	_k=rand("Table", of p[*]);
+
+	if _k=1 then
+		output Train_;
+	else
+		output Test_;
+	drop _k;
+run;
+
+data _null_;
+	if 0 then
+		set fusion_agregat_ nobs=N;
+
+	/* N = nb total d'observations */
+	nTrain=round(N * &propTrain);
+
+	/* taille du jeu d'apprentissage */
+	call symputx("nTrain", nTrain);
+	call symputx("nTest", N - nTrain);
+run;
+
+proc surveyselect data=Have_ seed=123 out=SSOut_ groups=(&nTrain, &nTest);
+run;
+
+proc freq data=SSOut_ order=freq;
+	tables GroupID / nocum;
+run;
+
+** on retire type_reseaux ind_fid et ind_pays ;
+%let var_regression1 = statut_cli   estParrain estFilleul ind_data 
+		ind_service ind_achats  ind_restaurant  
+		 ind_sport ind_autres ind_dursej  ind_monocanal 
+		ind_mtnuit      ;
+		
+** var retirées :
+temps_retour 
+type_voyage
+ind_fid
+type_reseaux
+ind_pays
+ind_saison
+ind_achatenfant
+ind_animation
+ind_achat_village
+ind_excursion
+;
+** REGRESSION LOGISTIQUE     ;
+ods output parameterEstimates=coeff_logit10;
+
+proc logistic data=WORK.TRAIN_ plots= roc outest=modelReg;
+	class &var_regression1. / param=glm;
+	model estRevenu(event='1')=&var_regression1. / link=logit  technique=fisher;
+	score data=train_ out=train_score;
+	score data=test_ out=test_score;
+	output out=work.Logistic_stats predicted=pred_;
+	score out=work.Logistic_scores;
+run;
+
+/* proc logistic plots (unpack maxpoints=none)=all inmodel=modelReg; */
+/* score data = Test_ out= testScore ;  */
+/* run; */
+** regarder les variable validés par le modèle avant de tester sur le test ;
+
+proc logistic data=test_ inest=modelReg;
+	class statut_cli ind_fid type_reseaux estParrain estFilleul ind_data 
+		ind_service ind_achats ind_animation ind_restaurant ind_achatenfant 
+		ind_excursion ind_sport ind_autres ind_dursej ind_monosaison ind_multisaison 
+		ind_monovillage ind_multi_village ind_multicanal ind_monocanal / param=ref;
+	model estRevenu(event='1')=statut_cli ind_fid type_reseaux estParrain 
+		estFilleul ind_data ind_service ind_achats ind_animation ind_restaurant 
+		ind_achatenfant ind_excursion ind_sport ind_autres ind_dursej ind_monosaison 
+		ind_multisaison ind_monovillage ind_multi_village ind_multicanal 
+		ind_monocanal moyReservation moyMtNuit / link=glogit maxiter=0;
+	output out=newout  predprobs=I;
+run;
+
+** matrice confusion table test ;
+
+proc freq data=TRAIN_score;
+	table F_estRevenu * I_estRevenu / nocol nocum nopercent norow;
+run;
+
+proc freq data=test_Score;
+	table F_estRevenu * I_estRevenu / nocol nocum nopercent norow;
+run;
+
+/*  graphs  */
+ods graphics / reset width=6.4in height=4.8in imagemap;
+
+proc sort data=WORK.FUSION_AGREGAT_ out=_HistogramTaskData;
+	by ind_fid;
+run;
+
+proc sgplot data=_HistogramTaskData;
+	histogram moymtnuit / binstart=0 binwidth=200 datalabel=auto;
+	yaxis grid;
+run;
+
+proc sort data=fusion_agregat_;
+	by estrevenu statut_cli;
+run;
+
+proc boxplot data=fusion_agregat_;
+	plot estrevenu*statut_cli;
+run;
+
+proc sgplot data=_HistogramTaskData;
+	by estRevenu;
+	histogram temps_retour /;
+	yaxis grid;
+run;
+
+** l'achat en village semble avoir une influence sur le fait de revenir en village ;
+ods graphics / reset;
+
+
+ods graphics off;
+
+
+
+
+
+/* Macro pour calculer l'aire  sous la courbe de ROC */
+%MACRO AUC2(data, cible, score);
+	ods output WilcoxonScores=wilcoxon;
+
+	proc npar1way wilcoxon data=&data. correct=no;
+		class &cible.;
+		var &score.;
+	run;
+
+	data auc;
+		set wilcoxon;
+		n0=N;
+		R0=SumOfScores;
+		n1=LAG(N);
+		R1=LAG(SumOfScores);
+		U1=(n1*n0) + (n1*(n1+1)/2) - R1;
+		U0=(n1*n0) + (n0*(n0+1)/2) - R0;
+		AUC=round(max(U1, U0) / (n1*n0), 0.001);
+	run;
+
+	proc print data=auc (keep=auc) noobs;
+		title "Aire sous la courbe ROC de &data.";
+		where AUC > .;
+	run;
+
+	title "";
+%mend AUC2;
+
+%AUC2(test_score, estRevenu, P_1);
+%AUC2(train_score, estRevenu, P_1);
+** CALCUL GRILLE DE SCORE ;
+ods output parameterEstimates=coeff_logit;
+
+proc sort data=coeff_logit10 out=coeff_tmp10;
+	by variable estimate;
+run;
+
+data coeff_tmp10;
+	set coeff_tmp10 end=fin;
+	by Variable;
+	retain min max delta_tot 0;
+
+	if first.variable then
+		do min=estimate;
+			max=0;
+		end;
+	delta_coeff=sum(estimate, -min);
+
+	if delta_coeff > max then
+		max=delta_coeff;
+
+	if last.variable then
+		delta_tot=sum(delta_tot, max);
+
+	if fin then
+		call symput('total_poids', delta_tot);
+run;
+
+/* je calcule le nb de points issu des coefficients de la régression */
+data grille (drop=min delta_tot delta_coeff);
+	set coeff_tmp10;
+	nbpoints=round (100* (estimate - min) / &total_poids.);
+run;
+
+/* on affiche la grille */
+proc print data=grille(keep = variable classval0 nbpoints);
+run;
+
+/* on applique la grille à notre jeu de données */
+data Logistic_stats;
+	** table output out = de la régression ;
+	set Logistic_stats;
+	nbpoints=sum(14*(ind_sport = 1 ),3*(statut_cli = 'Couple'),5*(statut_cli = 'Famille'),9*(statut_cli ='Célibataire'),3*(ind_service = 1),
+	5*(ind_restaurant=1), 3*(ind_mtnuit = 'd. [500;850[' ), 4*(ind_mtnuit = 'c. [350;500['), 5*(ind_mtnuit = 'a. [0;250['), 5*(ind_mtnuit = 'b. [250;350['),
+	3*(ind_monocanal = 0), 11*(ind_dursej = '+ de 7 jours'), 9*(ind_dursej = 'weekend'), 12*(ind_data = 1), 10*(ind_autres = 1), 7*(ind_achats = 1), 12*(estParrain = 1), 10*(estFilleul = 0));
+run;
+
+proc gplot data=Logistic_stats;
+	plot nbpoints * pred_;
+	run;
+quit;
+
+proc format;
+	value nbpoints 0-25='0 à 25 points'
+	26-45= '26 à 45 points'
+	46-60='46 à 60 points'
+	61-95='61 à 95 points'
+	96-high='> 95 points';
+run;
+
+proc freq data=Logistic_stats;
+	tables nbpoints * estRevenu /nocol nocum  norow;
+	format nbpoints nbpoints.;
+	title 'Distribution du nombre de points avec la variable cible';
+run;
+
+/* Recommandations */ 
+proc sort data = base_ ; by   datdep ; run;
+data base_association(keep= numcli histo_bis) ; 
+set base_ (where=(histo_bis ne '')); 
+run;
+data base_fusion(keep= numcli type_voyage); 
+set fusion_agregat_(where=(type_voyage not in('multi sej mono village','mono sej mono village','change de temps en temps'))) ; /* on isole les monovillage et ceux qui changent de temps en temps car sinon recommande le même village */ 
+run; 
+
+proc sort data = base_fusion ; by numcli ; run;
+proc sort data = base_association ; by numcli ; run;
+data fus_assoc ; 
+merge base_fusion(in=a) base_association(in=b) ; 
+by numcli ; 
+if a and b ; 
+run;
+
+
+data association(keep = village_prec village_suiv nb); 
+set fus_assoc;
+length nb 8. village_prec village_suiv $4. ;
+
+village_prec = compress(scan(histo_bis,1,'-'));
+village_suiv = compress(scan(histo_bis,-1,'-'));
+nb = 1 ; 
+run; 
+
+
+/* proc freq data = association ; table village_prec * village_suiv /nocol nocum nopercent ; run ;  */
+proc sort data = association ; by village_prec village_suiv ; run;
+proc means data= association sum noprint;
+by village_prec village_suiv   ; 
+var nb; 
+output out = agg_assoc(drop= _type_ _freq_)
+sum=;  
+
+
+run;
+
+proc sort data = agg_assoc ; by village_prec descending nb ;run;
+proc sort data = agg_assoc nodupkey out = fin_reco ; by village_prec ; run;
+proc freq data = fin_reco ; table village_prec*village_suiv /nocol nocum norow nopercent ; run;
+
+
+
+
